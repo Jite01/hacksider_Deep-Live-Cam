@@ -28,9 +28,12 @@ def pre_start() -> bool:
     elif not get_one_face(cv2.imread(modules.globals.source_path)):
         update_status('No face in source path detected.', NAME)
         return False
-    if not is_image(modules.globals.target_path) and not is_video(modules.globals.target_path):
-        update_status('Select an image or video for target path.', NAME)
+
+    target_path = modules.globals.target_path
+    if not (is_image(target_path) or is_video(target_path) or str(target_path).startswith(("rtsp://", "rtmp://"))):
+        update_status('Select a valid target: image, video, or RTSP/RTMP stream.', NAME)
         return False
+
     return True
 
 
