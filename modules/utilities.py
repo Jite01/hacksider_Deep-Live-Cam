@@ -85,9 +85,18 @@ def normalize_output_path(source_path: str, target_path: str, output_path: str) 
     return output_path
 
 
+import re
+
 def create_temp(target_path: str) -> None:
-    temp_directory_path = get_temp_directory_path(target_path)
+    # Sanitize stream URLs for use in file system paths
+    if target_path.startswith(('rtsp://', 'rtmp://')):
+        sanitized_name = re.sub(r'[^\w\-_.]', '_', target_path)
+        temp_directory_path = f'temp/{sanitized_name}'
+    else:
+        temp_directory_path = os.path.splitext(target_path)[0] + '/temp'
+
     Path(temp_directory_path).mkdir(parents=True, exist_ok=True)
+    modules.globals.temp_path = temp_directory_path
 
 
 def move_temp(target_path: str, output_path: str) -> None:
