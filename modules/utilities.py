@@ -1,3 +1,7 @@
+import cv2
+import time
+import numpy as np
+
 import glob
 import mimetypes
 import os
@@ -45,6 +49,47 @@ def detect_fps(target_path: str) -> float:
 def extract_frames(target_path: str) -> None:
     temp_directory_path = get_temp_directory_path(target_path)
     run_ffmpeg(['-i', target_path, '-pix_fmt', 'rgb24', os.path.join(temp_directory_path, '%04d.png')])
+
+    # Handle RTSP streams differently
+    if target_path.startswith('rtsp://') or target_path.startswith('rtmp://'):
+        extract_frames_from_stream(target_path)
+    else:
+        temp_directory_path = get_temp_directory_path(target_path)
+        run_ffmpeg(['-i', target_path, '-pix_fmt', 'rgb24', os.path.join(temp_directory_path, '%04d.png')])
+
+
+# Add this new function for RTSP frame extraction
+def extract_frames_from_stream(stream_url: str) -> None:
+    temp_directory_path = get_temp_directory_path(stream_url)
+    os.makedirs(temp_directory_path, exist_ok=True)
+
+    cap = cv2.VideoCapture(stream_url)
+    if not cap.isOpened():
+        print(f"Error: Could not open stream {stream_url}")
+        return
+
+    frame_count = 0
+    last_log_time = time.time()
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Stream ended or connection lost")
+            break
+
+        # Save frame as PNG
+        frame_path = os.path.join(temp_directory_path, f"{frame_count:04d}.png")
+        cv2.imwrite(frame_path, frame)
+        frame_count += 1
+
+        # Log progress every 2 seconds
+        current_time = time.time()
+        if current_time - last_log_time >= 2:
+            print(f"Extracted {frame_count} frames")
+            last_log_time = current_time
+
+    cap.release()
+    print(f"Finished extracting {frame_count} frames")
 
 
 def create_video(target_path: str, fps: float = 30.0) -> None:

@@ -19,7 +19,12 @@ import modules.globals
 import modules.metadata
 import modules.ui as ui
 from modules.processors.frame.core import get_frame_processors_modules
-from modules.utilities import has_image_extension, is_image, is_video, detect_fps, create_video, extract_frames, get_temp_frame_paths, restore_audio, create_temp, move_temp, clean_temp, normalize_output_path
+from modules.utilities import (
+    has_image_extension, is_image, is_video,
+    detect_fps, create_video, extract_frames,
+    get_temp_frame_paths, restore_audio, create_temp,
+    move_temp, clean_temp, normalize_output_path
+)
 
 if 'ROCMExecutionProvider' in modules.globals.execution_providers:
     del torch
@@ -31,8 +36,8 @@ warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
 def parse_args() -> None:
     signal.signal(signal.SIGINT, lambda signal_number, frame: destroy())
     program = argparse.ArgumentParser()
-    program.add_argument('-s', '--source', help='select an source image', dest='source_path')
-    program.add_argument('-t', '--target', help='select an target image or video', dest='target_path')
+    program.add_argument('-s', '--source', help='select a source image', dest='source_path')
+    program.add_argument('-t', '--target', help='select a target image or video', dest='target_path')
     program.add_argument('-o', '--output', help='select output file or directory', dest='output_path')
     program.add_argument('--frame-processor', help='pipeline of frame processors', dest='frame_processor', default=['face_swapper'], choices=['face_swapper', 'face_enhancer'], nargs='+')
     program.add_argument('--keep-fps', help='keep original fps', dest='keep_fps', action='store_true', default=False)
@@ -46,7 +51,7 @@ def parse_args() -> None:
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
     program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
 
-    # register deprecated args
+    # Deprecated args
     program.add_argument('-f', '--face', help=argparse.SUPPRESS, dest='source_path_deprecated')
     program.add_argument('--cpu-cores', help=argparse.SUPPRESS, dest='cpu_cores_deprecated', type=int)
     program.add_argument('--gpu-vendor', help=argparse.SUPPRESS, dest='gpu_vendor_deprecated')
@@ -69,15 +74,11 @@ def parse_args() -> None:
     modules.globals.execution_providers = decode_execution_providers(args.execution_provider)
     modules.globals.execution_threads = args.execution_threads
 
-    #for ENHANCER tumbler:
-    if 'face_enhancer' in args.frame_processor:
-        modules.globals.fp_ui['face_enhancer'] = True
-    else:
-        modules.globals.fp_ui['face_enhancer'] = False
-    
+    # Face enhancer toggle
+    modules.globals.fp_ui['face_enhancer'] = 'face_enhancer' in args.frame_processor
     modules.globals.nsfw = False
 
-    # translate deprecated args
+    # Handle deprecated args
     if args.source_path_deprecated:
         print('\033[33mArgument -f and --face are deprecated. Use -s and --source instead.\033[0m')
         modules.globals.source_path = args.source_path_deprecated
@@ -92,7 +93,7 @@ def parse_args() -> None:
         print('\033[33mArgument --gpu-vendor nvidia is deprecated. Use --execution-provider cuda instead.\033[0m')
         modules.globals.execution_providers = decode_execution_providers(['cuda'])
     if args.gpu_vendor_deprecated == 'amd':
-        print('\033[33mArgument --gpu-vendor amd is deprecated. Use --execution-provider cuda instead.\033[0m')
+        print('\033[33mArgument --gpu-vendor amd is deprecated. Use --execution-provider rocm instead.\033[0m')
         modules.globals.execution_providers = decode_execution_providers(['rocm'])
     if args.gpu_threads_deprecated:
         print('\033[33mArgument --gpu-threads is deprecated. Use --execution-threads instead.\033[0m')
@@ -100,38 +101,27 @@ def parse_args() -> None:
 
 
 def encode_execution_providers(execution_providers: List[str]) -> List[str]:
-    return [execution_provider.replace('ExecutionProvider', '').lower() for execution_provider in execution_providers]
-
+    return [ep.replace('ExecutionProvider', '').lower() for ep in execution_providers]
 
 def decode_execution_providers(execution_providers: List[str]) -> List[str]:
-    return [provider for provider, encoded_execution_provider in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
-            if any(execution_provider in encoded_execution_provider for execution_provider in execution_providers)]
-
+    return [provider for provider, short in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
+            if any(ep in short for ep in execution_providers)]
 
 def suggest_max_memory() -> int:
-    if platform.system().lower() == 'darwin':
-        return 4
-    return 16
-
+    return 4 if platform.system().lower() == 'darwin' else 16
 
 def suggest_execution_providers() -> List[str]:
     return encode_execution_providers(onnxruntime.get_available_providers())
 
-
 def suggest_execution_threads() -> int:
-    if 'DmlExecutionProvider' in modules.globals.execution_providers:
-        return 1
-    if 'ROCMExecutionProvider' in modules.globals.execution_providers:
+    if 'DmlExecutionProvider' in modules.globals.execution_providers or 'ROCMExecutionProvider' in modules.globals.execution_providers:
         return 1
     return 8
 
-
 def limit_resources() -> None:
-    # prevent tensorflow memory leak
     gpus = tensorflow.config.experimental.list_physical_devices('GPU')
     for gpu in gpus:
         tensorflow.config.experimental.set_memory_growth(gpu, True)
-    # limit memory usage
     if modules.globals.max_memory:
         memory = modules.globals.max_memory * 1024 ** 3
         if platform.system().lower() == 'darwin':
@@ -144,11 +134,9 @@ def limit_resources() -> None:
             import resource
             resource.setrlimit(resource.RLIMIT_DATA, (memory, memory))
 
-
 def release_resources() -> None:
     if 'CUDAExecutionProvider' in modules.globals.execution_providers:
         torch.cuda.empty_cache()
-
 
 def pre_check() -> bool:
     if sys.version_info < (3, 9):
@@ -159,48 +147,49 @@ def pre_check() -> bool:
         return False
     return True
 
-
 def update_status(message: str, scope: str = 'DLC.CORE') -> None:
     print(f'[{scope}] {message}')
     if not modules.globals.headless:
         ui.update_status(message)
 
+def is_stream(path: str) -> bool:
+    return path.startswith('rtsp://') or path.startswith('rtmp://')
 
 def start() -> None:
-    for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
-        if not frame_processor.pre_start():
+    for processor in get_frame_processors_modules(modules.globals.frame_processors):
+        if not processor.pre_start():
             return
-    # process image to image
+
     if has_image_extension(modules.globals.target_path):
-        if modules.globals.nsfw == False:
+        if not modules.globals.nsfw:
             from modules.predicter import predict_image
             if predict_image(modules.globals.target_path):
                 destroy()
         shutil.copy2(modules.globals.target_path, modules.globals.output_path)
-        for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
-            update_status('Progressing...', frame_processor.NAME)
-            frame_processor.process_image(modules.globals.source_path, modules.globals.output_path, modules.globals.output_path)
+        for processor in get_frame_processors_modules(modules.globals.frame_processors):
+            update_status('Progressing...', processor.NAME)
+            processor.process_image(modules.globals.source_path, modules.globals.output_path, modules.globals.output_path)
             release_resources()
-        if is_image(modules.globals.target_path):
-            update_status('Processing to image succeed!')
-        else:
-            update_status('Processing to image failed!')
+        update_status('Processing to image succeed!' if is_image(modules.globals.target_path) else 'Processing to image failed!')
         return
-    # process image to videos
-    if modules.globals.nsfw == False:
+
+    if not modules.globals.nsfw:
         from modules.predicter import predict_video
         if predict_video(modules.globals.target_path):
             destroy()
+
     update_status('Creating temp resources...')
     create_temp(modules.globals.target_path)
-    update_status('Extracting frames...')
+
+    update_status('Processing live stream...' if is_stream(modules.globals.target_path) else 'Extracting frames...')
     extract_frames(modules.globals.target_path)
+
     temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
-    for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
-        update_status('Progressing...', frame_processor.NAME)
-        frame_processor.process_video(modules.globals.source_path, temp_frame_paths)
+    for processor in get_frame_processors_modules(modules.globals.frame_processors):
+        update_status('Progressing...', processor.NAME)
+        processor.process_video(modules.globals.source_path, temp_frame_paths)
         release_resources()
-    # handles fps
+
     if modules.globals.keep_fps:
         update_status('Detecting fps...')
         fps = detect_fps(modules.globals.target_path)
@@ -209,35 +198,27 @@ def start() -> None:
     else:
         update_status('Creating video with 30.0 fps...')
         create_video(modules.globals.target_path)
-    # handle audio
+
     if modules.globals.keep_audio:
-        if modules.globals.keep_fps:
-            update_status('Restoring audio...')
-        else:
-            update_status('Restoring audio might cause issues as fps are not kept...')
+        update_status('Restoring audio...' if modules.globals.keep_fps else 'Restoring audio might cause issues as fps are not kept...')
         restore_audio(modules.globals.target_path, modules.globals.output_path)
     else:
         move_temp(modules.globals.target_path, modules.globals.output_path)
-    # clean and validate
-    clean_temp(modules.globals.target_path)
-    if is_video(modules.globals.target_path):
-        update_status('Processing to video succeed!')
-    else:
-        update_status('Processing to video failed!')
 
+    clean_temp(modules.globals.target_path)
+    update_status('Processing to video succeed!' if is_video(modules.globals.target_path) else 'Processing to video failed!')
 
 def destroy() -> None:
     if modules.globals.target_path:
         clean_temp(modules.globals.target_path)
     quit()
 
-
 def run() -> None:
     parse_args()
     if not pre_check():
         return
-    for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
-        if not frame_processor.pre_check():
+    for processor in get_frame_processors_modules(modules.globals.frame_processors):
+        if not processor.pre_check():
             return
     limit_resources()
     if modules.globals.headless:
