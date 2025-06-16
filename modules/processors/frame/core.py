@@ -13,7 +13,7 @@ FRAME_PROCESSORS_MODULES: List[ModuleType] = []
 FRAME_PROCESSORS_INTERFACE = [
     'pre_check',
     'pre_start',
-    'process_frame',
+    'process_frame',  # This is key for real-time processing
     'process_image',
     'process_video'
 ]
@@ -29,8 +29,8 @@ def load_frame_processor_module(frame_processor: str) -> Any:
         return frame_processor_module
     except ImportError as e:
         print(f"Frame processor {frame_processor} not found")
-        print(e)  # <-- print actual import error
-        raise  # or remove sys.exit()
+        print(e)
+        raise
 
 
 def get_frame_processors_modules(frame_processors: List[str]) -> List[ModuleType]:
@@ -59,15 +59,14 @@ def set_frame_processors_modules_from_ui(frame_processors: List[str]) -> None:
                 FRAME_PROCESSORS_MODULES.remove(frame_processor_module)
                 modules.globals.frame_processors.remove(frame_processor)
             except ValueError:
-                # Module might not be loaded — safe to ignore
                 pass
 
 
 def multi_process_frame(
-    source_path: str,
-    temp_frame_paths: List[str],
-    process_frames: Callable[[str, List[str], Any], None],
-    progress: Any = None
+        source_path: str,
+        temp_frame_paths: List[str],
+        process_frames: Callable[[str, List[str], Any], None],
+        progress: Any = None
 ) -> None:
     with ThreadPoolExecutor(max_workers=modules.globals.execution_threads) as executor:
         futures = []
@@ -79,19 +78,23 @@ def multi_process_frame(
 
 
 def process_video(
-    source_path: str,
-    frame_paths: List[str],
-    process_frames: Callable[[str, List[str], Any], None]
+        source_path: str,
+        frame_paths: List[str],
+        process_frames: Callable[[str, List[str], Any], None]
 ) -> None:
+    # Skip progress bar for streams (handled in main core)
+    if modules.globals.target_path.startswith(('rtsp://', 'rtmp://')):
+        return
+
     progress_bar_format = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
     total = len(frame_paths)
 
     with tqdm(
-        total=total,
-        desc='Processing',
-        unit='frame',
-        dynamic_ncols=True,
-        bar_format=progress_bar_format
+            total=total,
+            desc='Processing',
+            unit='frame',
+            dynamic_ncols=True,
+            bar_format=progress_bar_format
     ) as progress:
         progress.set_postfix({
             'execution_providers': modules.globals.execution_providers,

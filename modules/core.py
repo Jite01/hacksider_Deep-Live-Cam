@@ -1,5 +1,7 @@
 import os
 import sys
+import subprocess  # Added missing import
+
 # single thread doubles cuda performance - needs to be set before torch import
 if any(arg.startswith('--execution-provider') for arg in sys.argv):
     os.environ['OMP_NUM_THREADS'] = '1'
@@ -14,6 +16,8 @@ import argparse
 import torch
 import onnxruntime
 import tensorflow
+import cv2
+import time
 
 import modules.globals
 import modules.metadata
@@ -39,17 +43,27 @@ def parse_args() -> None:
     program.add_argument('-s', '--source', help='select a source image', dest='source_path')
     program.add_argument('-t', '--target', help='select a target image or video', dest='target_path')
     program.add_argument('-o', '--output', help='select output file or directory', dest='output_path')
-    program.add_argument('--frame-processor', help='pipeline of frame processors', dest='frame_processor', default=['face_swapper'], choices=['face_swapper', 'face_enhancer'], nargs='+')
+    program.add_argument('--frame-processor', help='pipeline of frame processors', dest='frame_processor',
+                         default=['face_swapper'], choices=['face_swapper', 'face_enhancer'], nargs='+')
     program.add_argument('--keep-fps', help='keep original fps', dest='keep_fps', action='store_true', default=False)
-    program.add_argument('--keep-audio', help='keep original audio', dest='keep_audio', action='store_true', default=True)
-    program.add_argument('--keep-frames', help='keep temporary frames', dest='keep_frames', action='store_true', default=False)
-    program.add_argument('--many-faces', help='process every face', dest='many_faces', action='store_true', default=False)
-    program.add_argument('--video-encoder', help='adjust output video encoder', dest='video_encoder', default='libx264', choices=['libx264', 'libx265', 'libvpx-vp9'])
-    program.add_argument('--video-quality', help='adjust output video quality', dest='video_quality', type=int, default=18, choices=range(52), metavar='[0-51]')
-    program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int, default=suggest_max_memory())
-    program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=['cpu'], choices=suggest_execution_providers(), nargs='+')
-    program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
-    program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
+    program.add_argument('--keep-audio', help='keep original audio', dest='keep_audio', action='store_true',
+                         default=True)
+    program.add_argument('--keep-frames', help='keep temporary frames', dest='keep_frames', action='store_true',
+                         default=False)
+    program.add_argument('--many-faces', help='process every face', dest='many_faces', action='store_true',
+                         default=False)
+    program.add_argument('--video-encoder', help='adjust output video encoder', dest='video_encoder', default='libx264',
+                         choices=['libx264', 'libx265', 'libvpx-vp9'])
+    program.add_argument('--video-quality', help='adjust output video quality', dest='video_quality', type=int,
+                         default=18, choices=range(52), metavar='[0-51]')
+    program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int,
+                         default=suggest_max_memory())
+    program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=['cpu'],
+                         choices=suggest_execution_providers(), nargs='+')
+    program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int,
+                         default=suggest_execution_threads())
+    program.add_argument('-v', '--version', action='version',
+                         version=f'{modules.metadata.name} {modules.metadata.version}')
 
     # Deprecated args
     program.add_argument('-f', '--face', help=argparse.SUPPRESS, dest='source_path_deprecated')
@@ -61,7 +75,8 @@ def parse_args() -> None:
 
     modules.globals.source_path = args.source_path
     modules.globals.target_path = args.target_path
-    modules.globals.output_path = normalize_output_path(modules.globals.source_path, modules.globals.target_path, args.output_path)
+    modules.globals.output_path = normalize_output_path(modules.globals.source_path, modules.globals.target_path,
+                                                        args.output_path)
     modules.globals.frame_processors = args.frame_processor
     modules.globals.headless = args.source_path or args.target_path or args.output_path
     modules.globals.keep_fps = args.keep_fps
@@ -82,7 +97,8 @@ def parse_args() -> None:
     if args.source_path_deprecated:
         print('\033[33mArgument -f and --face are deprecated. Use -s and --source instead.\033[0m')
         modules.globals.source_path = args.source_path_deprecated
-        modules.globals.output_path = normalize_output_path(args.source_path_deprecated, modules.globals.target_path, args.output_path)
+        modules.globals.output_path = normalize_output_path(args.source_path_deprecated, modules.globals.target_path,
+                                                            args.output_path)
     if args.cpu_cores_deprecated:
         print('\033[33mArgument --cpu-cores is deprecated. Use --execution-threads instead.\033[0m')
         modules.globals.execution_threads = args.cpu_cores_deprecated
@@ -103,20 +119,26 @@ def parse_args() -> None:
 def encode_execution_providers(execution_providers: List[str]) -> List[str]:
     return [ep.replace('ExecutionProvider', '').lower() for ep in execution_providers]
 
+
 def decode_execution_providers(execution_providers: List[str]) -> List[str]:
-    return [provider for provider, short in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
+    return [provider for provider, short in zip(onnxruntime.get_available_providers(),
+                                                encode_execution_providers(onnxruntime.get_available_providers()))
             if any(ep in short for ep in execution_providers)]
+
 
 def suggest_max_memory() -> int:
     return 4 if platform.system().lower() == 'darwin' else 16
 
+
 def suggest_execution_providers() -> List[str]:
     return encode_execution_providers(onnxruntime.get_available_providers())
+
 
 def suggest_execution_threads() -> int:
     if 'DmlExecutionProvider' in modules.globals.execution_providers or 'ROCMExecutionProvider' in modules.globals.execution_providers:
         return 1
     return 8
+
 
 def limit_resources() -> None:
     gpus = tensorflow.config.experimental.list_physical_devices('GPU')
@@ -134,9 +156,11 @@ def limit_resources() -> None:
             import resource
             resource.setrlimit(resource.RLIMIT_DATA, (memory, memory))
 
+
 def release_resources() -> None:
     if 'CUDAExecutionProvider' in modules.globals.execution_providers:
         torch.cuda.empty_cache()
+
 
 def pre_check() -> bool:
     if sys.version_info < (3, 9):
@@ -147,19 +171,108 @@ def pre_check() -> bool:
         return False
     return True
 
+
 def update_status(message: str, scope: str = 'DLC.CORE') -> None:
     print(f'[{scope}] {message}')
     if not modules.globals.headless:
         ui.update_status(message)
 
+
 def is_stream(path: str) -> bool:
     return path.startswith('rtsp://') or path.startswith('rtmp://')
+
+
+def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
+    """Process a live video stream in real-time"""
+    # Initialize video capture
+    cap = cv2.VideoCapture(stream_url)
+    if not cap.isOpened():
+        update_status(f'Error: Could not open stream {stream_url}')
+        return
+
+    # Get stream properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30.0  # Default to 30 FPS if not detected
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Initialize frame processors
+    frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
+    for processor in frame_processors:
+        if not processor.pre_start():
+            cap.release()
+            return
+
+    # Initialize video writer for RTMP output
+    writer = None
+    if output_url.startswith('rtmp://'):
+        # Use FFmpeg for RTMP output
+        command = [
+            'ffmpeg',
+            '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f'{width}x{height}',
+            '-r', str(fps),
+            '-i', '-',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-preset', 'ultrafast',
+            '-f', 'flv',
+            output_url
+        ]
+        writer = subprocess.Popen(command, stdin=subprocess.PIPE)
+
+    frame_count = 0
+    start_time = time.time()
+    last_log_time = start_time
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                update_status('Stream ended or connection lost')
+                break
+
+            # Process the frame through all processors
+            processed_frame = frame.copy()
+            for processor in frame_processors:
+                processed_frame = processor.process_frame(source_path, processed_frame)
+
+            # Output result
+            if writer:
+                writer.stdin.write(processed_frame.tobytes())
+            elif output_url:
+                cv2.imwrite(output_url, processed_frame)
+
+            # Log progress every 2 seconds
+            current_time = time.time()
+            if current_time - last_log_time >= 2:
+                elapsed = current_time - start_time
+                current_fps = frame_count / elapsed if elapsed > 0 else 0
+                update_status(f'Processed {frame_count} frames ({current_fps:.2f} FPS)')
+                last_log_time = current_time
+
+            frame_count += 1
+
+    except KeyboardInterrupt:
+        update_status('Processing interrupted by user')
+    finally:
+        cap.release()
+        if writer:
+            writer.stdin.close()
+            writer.wait()
+        update_status(f'Finished processing {frame_count} frames')
+
 
 def start() -> None:
     for processor in get_frame_processors_modules(modules.globals.frame_processors):
         if not processor.pre_start():
             return
 
+    # Process image to image
     if has_image_extension(modules.globals.target_path):
         if not modules.globals.nsfw:
             from modules.predicter import predict_image
@@ -168,11 +281,25 @@ def start() -> None:
         shutil.copy2(modules.globals.target_path, modules.globals.output_path)
         for processor in get_frame_processors_modules(modules.globals.frame_processors):
             update_status('Progressing...', processor.NAME)
-            processor.process_image(modules.globals.source_path, modules.globals.output_path, modules.globals.output_path)
+            processor.process_image(modules.globals.source_path, modules.globals.output_path,
+                                    modules.globals.output_path)
             release_resources()
-        update_status('Processing to image succeed!' if is_image(modules.globals.target_path) else 'Processing to image failed!')
+        update_status(
+            'Processing to image succeed!' if is_image(modules.globals.target_path) else 'Processing to image failed!')
         return
 
+    # Process streams differently
+    if is_stream(modules.globals.target_path):
+        if not modules.globals.nsfw:
+            # Skip NSFW check for streams since it's real-time
+            pass
+
+        update_status('Processing live stream...')
+        process_stream(modules.globals.source_path, modules.globals.target_path, modules.globals.output_path)
+        update_status('Stream processing completed')
+        return
+
+    # Process regular videos
     if not modules.globals.nsfw:
         from modules.predicter import predict_video
         if predict_video(modules.globals.target_path):
@@ -181,7 +308,7 @@ def start() -> None:
     update_status('Creating temp resources...')
     create_temp(modules.globals.target_path)
 
-    update_status('Processing live stream...' if is_stream(modules.globals.target_path) else 'Extracting frames...')
+    update_status('Extracting frames...')
     extract_frames(modules.globals.target_path)
 
     temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
@@ -200,18 +327,22 @@ def start() -> None:
         create_video(modules.globals.target_path)
 
     if modules.globals.keep_audio:
-        update_status('Restoring audio...' if modules.globals.keep_fps else 'Restoring audio might cause issues as fps are not kept...')
+        update_status(
+            'Restoring audio...' if modules.globals.keep_fps else 'Restoring audio might cause issues as fps are not kept...')
         restore_audio(modules.globals.target_path, modules.globals.output_path)
     else:
         move_temp(modules.globals.target_path, modules.globals.output_path)
 
     clean_temp(modules.globals.target_path)
-    update_status('Processing to video succeed!' if is_video(modules.globals.target_path) else 'Processing to video failed!')
+    update_status(
+        'Processing to video succeed!' if is_video(modules.globals.target_path) else 'Processing to video failed!')
+
 
 def destroy() -> None:
     if modules.globals.target_path:
         clean_temp(modules.globals.target_path)
     quit()
+
 
 def run() -> None:
     parse_args()
