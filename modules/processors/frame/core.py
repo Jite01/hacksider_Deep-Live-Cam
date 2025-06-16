@@ -27,9 +27,10 @@ def load_frame_processor_module(frame_processor: str) -> Any:
                 print(f"Frame processor {frame_processor} missing required method: {method_name}")
                 sys.exit()
         return frame_processor_module
-    except ImportError:
+    except ImportError as e:
         print(f"Frame processor {frame_processor} not found")
-        sys.exit()
+        print(e)  # <-- print actual import error
+        raise  # or remove sys.exit()
 
 
 def get_frame_processors_modules(frame_processors: List[str]) -> List[ModuleType]:
