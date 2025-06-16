@@ -1,16 +1,17 @@
 import sys
 import importlib
-import cv2
-import os
-import time
 from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType
 from typing import Any, List, Callable
 from tqdm import tqdm
+import cv2
+import os
 
+import modules
 import modules.globals
 
 FRAME_PROCESSORS_MODULES: List[ModuleType] = []
+
 FRAME_PROCESSORS_INTERFACE = [
     'pre_check',
     'pre_start',
@@ -19,36 +20,46 @@ FRAME_PROCESSORS_INTERFACE = [
     'process_video'
 ]
 
-# RTSP-specific configurations
-RTSP_RECONNECT_DELAY = 2  # seconds
-RTSP_MAX_RETRIES = 5
-RTSP_TIMEOUT = 5000  # milliseconds
+def load_frame_processor_module(frame_processor: str) -> Any:
+    try:
+        frame_processor_module = importlib.import_module(f'modules.processors.frame.{frame_processor}')
+        for method_name in FRAME_PROCESSORS_INTERFACE:
+            if not hasattr(frame_processor_module, method_name):
+                print(f"Frame processor {frame_processor} missing required method: {method_name}")
+                sys.exit()
+    except ImportError:
+        print(f"Frame processor {frame_processor} not found")
+        sys.exit()
+    return frame_processor_module
 
+def get_frame_processors_modules(frame_processors: List[str]) -> List[ModuleType]:
+    global FRAME_PROCESSORS_MODULES
+    if not FRAME_PROCESSORS_MODULES:
+        for frame_processor in frame_processors:
+            frame_processor_module = load_frame_processor_module(frame_processor)
+            FRAME_PROCESSORS_MODULES.append(frame_processor_module)
+    set_frame_processors_modules_from_ui(frame_processors)
+    return FRAME_PROCESSORS_MODULES
 
-def is_rtsp(path: str) -> bool:
-    """Check if path is an RTSP stream URL"""
-    return isinstance(path, str) and path.lower().startswith('rtsp://')
+def set_frame_processors_modules_from_ui(frame_processors: List[str]) -> None:
+    global FRAME_PROCESSORS_MODULES
+    for frame_processor, state in modules.globals.fp_ui.items():
+        if state is True and frame_processor not in frame_processors:
+            frame_processor_module = load_frame_processor_module(frame_processor)
+            FRAME_PROCESSORS_MODULES.append(frame_processor_module)
+            modules.globals.frame_processors.append(frame_processor)
+        elif state is False:
+            try:
+                frame_processor_module = load_frame_processor_module(frame_processor)
+                FRAME_PROCESSORS_MODULES.remove(frame_processor_module)
+                modules.globals.frame_processors.remove(frame_processor)
+            except:
+                pass
 
-
-def open_rtsp_stream(rtsp_url: str) -> cv2.VideoCapture:
-    """Open RTSP stream with optimized parameters"""
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_TIMEOUT)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    return cap
-
-
-def extract_frames(video_path: str, temp_frame_paths: List[str], max_frames: int = None) -> float:
-    """Enhanced frame extraction supporting both files and RTSP streams"""
-    if is_rtsp(video_path):
-        # RTSP streams are handled in real-time, no frame extraction needed
-        return 30.0  # Default FPS for live streams
-
-    # Standard video file processing
+def extract_frames_from_stream(video_path: str, temp_frame_paths: List[str], max_frames: int = None) -> float:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[ERROR] Failed to open video source: {video_path}")
+        print(f"Failed to open stream: {video_path}")
         return 0.0
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -69,70 +80,22 @@ def extract_frames(video_path: str, temp_frame_paths: List[str], max_frames: int
             break
 
     cap.release()
+    modules.globals.fps = fps
     return fps
 
+def multi_process_frame(source_path: str, temp_frame_paths: List[str], process_frames: Callable[[str, List[str], Any], None], progress: Any = None) -> None:
+    with ThreadPoolExecutor(max_workers=modules.globals.execution_threads) as executor:
+        futures = []
+        for path in temp_frame_paths:
+            future = executor.submit(process_frames, source_path, [path], progress)
+            futures.append(future)
+        for future in futures:
+            future.result()
 
-def process_rtsp_stream(rtsp_url: str, process_frame_fn: Callable) -> None:
-    """Real-time RTSP stream processing"""
-    retries = 0
-    while retries < RTSP_MAX_RETRIES:
-        cap = open_rtsp_stream(rtsp_url)
-        if not cap.isOpened():
-            print(f"[RTSP] Connection failed (attempt {retries + 1}/{RTSP_MAX_RETRIES})")
-            retries += 1
-            time.sleep(RTSP_RECONNECT_DELAY)
-            continue
-
-        print(f"[RTSP] Stream connected: {rtsp_url}")
-        frame_count = 0
-        start_time = time.time()
-
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    print("[RTSP] Frame read error")
-                    break
-
-                # Process frame directly without saving
-                processed_frame = process_frame_fn(rtsp_url, frame)
-
-                # Output handling would go here
-                frame_count += 1
-
-                # Calculate FPS every second
-                elapsed = time.time() - start_time
-                if elapsed >= 1.0:
-                    fps = frame_count / elapsed
-                    print(f"[RTSP] Processing FPS: {fps:.1f}", end='\r')
-                    frame_count = 0
-                    start_time = time.time()
-
-        except Exception as e:
-            print(f"[RTSP] Error: {str(e)}")
-
-        finally:
-            cap.release()
-            print("\n[RTSP] Stream disconnected")
-            retries += 1
-            time.sleep(RTSP_RECONNECT_DELAY)
-
-    print("[RTSP] Max retries reached, giving up")
-
-
-# ... [rest of the existing functions remain unchanged] ...
-
-def process_video(source_path: str, frame_paths: list[str], process_frames: Callable) -> None:
-    """Modified to handle both file and RTSP processing"""
-    if is_rtsp(source_path):
-        process_rtsp_stream(source_path, lambda path, frame: process_frames(path, [frame], None))
-        return
-
-    # Original file-based processing
+def process_video(source_path: str, frame_paths: List[str], process_frames: Callable[[str, List[str], Any], None]) -> None:
     progress_bar_format = '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
     total = len(frame_paths)
-    with tqdm(total=total, desc='Processing', unit='frame', dynamic_ncols=True,
-              bar_format=progress_bar_format) as progress:
+    with tqdm(total=total, desc='Processing', unit='frame', dynamic_ncols=True, bar_format=progress_bar_format) as progress:
         progress.set_postfix({
             'execution_providers': modules.globals.execution_providers,
             'execution_threads': modules.globals.execution_threads,
