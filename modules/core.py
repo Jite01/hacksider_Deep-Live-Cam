@@ -183,32 +183,50 @@ def is_stream(path: str) -> bool:
 
 
 def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
-    """Process RTSP stream with UDP fallback and robust error handling"""
+    """Process RTSP stream with advanced diagnostics and fallbacks"""
     cv2.ocl.setUseOpenCL(False)
     cap = cv2.VideoCapture()
 
-    # Configure with UDP transport (since TCP fails)
-    udp_url = stream_url
-    tcp_url = stream_url + '?tcp'
+    # Configure with minimal buffer
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    # Try UDP first (since we know it works from ffplay)
-    if not cap.open(udp_url, cv2.CAP_FFMPEG):
-        update_status('UDP transport failed, trying TCP')
-        if not cap.open(tcp_url, cv2.CAP_FFMPEG):
-            update_status('Both UDP and TCP failed - check stream URL')
-            return
+    # Try different transport protocols
+    transport_options = [
+        ('udp', stream_url),  # Default UDP
+        ('tcp', stream_url + '?tcp'),
+        ('udp_mcast', stream_url + '?udp_multicast=1'),
+        ('http', stream_url.replace('rtsp://', 'http://'))
+    ]
+
+    connected = False
+    for transport_name, transport_url in transport_options:
+        update_status(f'Trying {transport_name} transport: {transport_url}')
+        if cap.open(transport_url, cv2.CAP_FFMPEG):
+            update_status(f'Connected via {transport_name} transport')
+            connected = True
+            break
+        else:
+            update_status(f'Failed with {transport_name} transport')
+
+    if not connected:
+        update_status('All transport protocols failed - check stream URL and network')
+        # Try direct URL without FFMPEG backend
+        update_status('Trying direct open without FFMPEG backend')
+        if cap.open(stream_url):
+            update_status('Connected without FFMPEG backend')
+            connected = True
+
+    if not connected:
+        update_status('Could not connect to stream - exiting')
+        return
 
     # Get stream properties
-    fps = 30  # Default, will try to read actual FPS
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 30
-    except:
-        pass
-
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    update_status(f'Stream properties: {width}x{height} @ {fps:.2f} FPS')
 
     # Initialize processors
     frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
@@ -235,12 +253,13 @@ def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
             '-f', 'flv',
             output_url
         ]
+        update_status(f'Starting FFmpeg output: {" ".join(command)}')
         writer = subprocess.Popen(command, stdin=subprocess.PIPE)
 
     frame_count = 0
     start_time = time.time()
     last_log_time = start_time
-    max_retries = 5
+    max_retries = 10
     retry_count = 0
 
     try:
