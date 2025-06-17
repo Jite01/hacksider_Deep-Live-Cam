@@ -183,12 +183,24 @@ def is_stream(path: str) -> bool:
 
 
 def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
-    """Process a live video stream in real-time"""
-    # Initialize video capture
-    cap = cv2.VideoCapture(stream_url)
-    if not cap.isOpened():
-        update_status(f'Error: Could not open stream {stream_url}')
-        return
+    """Process a live video stream in real-time with robust error handling"""
+    # Configure OpenCV for RTSP
+    cv2.ocl.setUseOpenCL(False)
+    cap = cv2.VideoCapture()
+
+    # Set stream options
+    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # 5 second timeout
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer
+    cap.set(cv2.CAP_PROP_FPS, 30)  # Expected FPS
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'H264'))
+
+    # Try opening with TCP transport first
+    tcp_url = stream_url + '?tcp'
+    if not cap.open(tcp_url, cv2.CAP_FFMPEG):
+        update_status('TCP transport failed, trying UDP')
+        if not cap.open(stream_url, cv2.CAP_FFMPEG):
+            update_status('Failed to open stream with both TCP and UDP')
+            return
 
     # Get stream properties
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -204,10 +216,9 @@ def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
             cap.release()
             return
 
-    # Initialize video writer for RTMP output
+    # Initialize FFmpeg for RTMP output
     writer = None
     if output_url.startswith('rtmp://'):
-        # Use FFmpeg for RTMP output
         command = [
             'ffmpeg',
             '-y',
@@ -218,8 +229,9 @@ def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
             '-r', str(fps),
             '-i', '-',
             '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',
             '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-pix_fmt', 'yuv420p',
             '-f', 'flv',
             output_url
         ]
@@ -228,26 +240,50 @@ def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
     frame_count = 0
     start_time = time.time()
     last_log_time = start_time
+    consecutive_errors = 0
+    max_errors = 10  # Maximum consecutive errors before giving up
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                update_status('Stream ended or connection lost')
-                break
+                consecutive_errors += 1
+                if consecutive_errors >= max_errors:
+                    update_status('Too many consecutive errors, stopping')
+                    break
 
-            # Process the frame through all processors
+                # Try to reopen the stream
+                update_status('Frame read error, attempting to reconnect...')
+                cap.release()
+                time.sleep(1)  # Wait before reconnecting
+                if not cap.open(tcp_url, cv2.CAP_FFMPEG):
+                    update_status('Reconnection failed')
+                    break
+                continue
+
+            consecutive_errors = 0  # Reset error counter on successful read
+
+            # Process frame
             processed_frame = frame.copy()
             for processor in frame_processors:
-                processed_frame = processor.process_frame(source_path, processed_frame)
+                try:
+                    processed_frame = processor.process_frame(source_path, processed_frame)
+                except Exception as e:
+                    update_status(f'Processor error: {str(e)}')
+                    continue
 
             # Output result
             if writer:
-                writer.stdin.write(processed_frame.tobytes())
+                try:
+                    writer.stdin.write(processed_frame.tobytes())
+                except Exception as e:
+                    update_status(f'Output error: {str(e)}')
+                    break
             elif output_url:
                 cv2.imwrite(output_url, processed_frame)
 
-            # Log progress every 2 seconds
+            # Log progress
+            frame_count += 1
             current_time = time.time()
             if current_time - last_log_time >= 2:
                 elapsed = current_time - start_time
@@ -255,17 +291,16 @@ def process_stream(source_path: str, stream_url: str, output_url: str) -> None:
                 update_status(f'Processed {frame_count} frames ({current_fps:.2f} FPS)')
                 last_log_time = current_time
 
-            frame_count += 1
-
     except KeyboardInterrupt:
         update_status('Processing interrupted by user')
+    except Exception as e:
+        update_status(f'Unexpected error: {str(e)}')
     finally:
         cap.release()
         if writer:
             writer.stdin.close()
             writer.wait()
         update_status(f'Finished processing {frame_count} frames')
-
 
 def start() -> None:
     for processor in get_frame_processors_modules(modules.globals.frame_processors):
